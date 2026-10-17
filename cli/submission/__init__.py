@@ -1,0 +1,2 @@
+"""Student-owned model adapter."""
+

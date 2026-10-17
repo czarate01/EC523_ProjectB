@@ -1,0 +1,6 @@
+numpy==2.3.5
+scipy==1.15.2
+torch==2.6.0
+safetensors==0.5.3
+pystoi==0.4.1
+pesq==0.0.4
