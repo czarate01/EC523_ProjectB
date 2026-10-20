@@ -8,3 +8,4 @@ meta/
 *.safetensors
 *.pt
 __pycache__/
+dev/
