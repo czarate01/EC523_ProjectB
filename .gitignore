@@ -1,0 +1,10 @@
+.venv/
+data/
+runs/
+preds/
+reports/
+smoke_outputs/
+meta/
+*.safetensors
+*.pt
+__pycache__/
