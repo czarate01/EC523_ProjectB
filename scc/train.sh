@@ -14,7 +14,7 @@
 #$ -j y
 #$ -cwd
 
-ENV_PATH=${ENV_PATH:-/projectnb/CHANGE_ME/env}   # or export ENV_PATH before qsub -V
+ENV_PATH=${ENV_PATH:-/projectnb/ec523kb/students/czarate/env}
 module load miniconda
 conda activate "$ENV_PATH"
 nvidia-smi --query-gpu=name,memory.total --format=csv
