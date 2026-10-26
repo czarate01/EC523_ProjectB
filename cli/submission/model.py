@@ -820,15 +820,35 @@ CONFIG = dict(
     masking_mode='E',      # 'E', 'C', or 'R' (paper Eqs. 7-9)
     use_clstm=False,       # True: DCCRN-CL (use kernel_num [32, 64, 128, 256, 256, 256])
     use_cbn=False,         # True: complex batch norm (repository default is False)
+    lookahead = 0,             # 0: causal (paper default), 1: non-causal (repository default is 1)
+    bidirectional = False,    # True: bidirectional LSTM (paper default), False: unidirectional (repository default is True)
+
 )
 _MODE_CODE = {'E': 0.0, 'C': 1.0, 'R': 2.0}
 
+_DCCRN_KEYS = ('rnn_layers', 'rnn_units', 'win_len', 'win_inc', 'fft_len', 'win_type',
+               'masking_mode', 'use_clstm', 'use_cbn', 'kernel_size', 'kernel_num')
 
 def pad_to_hop(wave, hop):
     """Right-pad the last axis with zeros to a multiple of `hop`."""
     extra = (-wave.shape[-1]) % hop
     return F.pad(wave, (0, extra)) if extra else wave
 
+class DelayedLSTM(nn.Module):
+    def __init__(self, lstm, delay):
+        super().__init__()
+        self.lstm = lstm
+        self.delay = delay
+
+    def forward(self, x):
+        """x: [T, B, C]"""
+        x = F.pad(x, pad = (0,0,0,0,0,self.delay), mode = 'constant', value = 0) if self.delay > 0 else x
+        out, state = self.lstm(x)
+        indices_to_remove = [i for i in range(self.delay)] if self.delay > 0 else []
+        mask = torch.ones(out.shape[0], dtype=torch.bool, device=out.device)
+        mask[indices_to_remove] = False
+        filtered_out = out[mask]
+        return filtered_out, state
 
 class CourseEnhancer(nn.Module):
     """Wraps the unmodified DCCRN class in the course interface.
@@ -837,23 +857,55 @@ class CourseEnhancer(nn.Module):
     also have the course's enhance() method; this wrapper provides it.
     """
 
+
     def __init__(self, **config):
         super().__init__()
         self.config = dict(config)
-        self.model = DCCRN(**config)
+        
         # The original STFT kernels are transposed numpy arrays (non-contiguous);
         # safetensors refuses to save those, so store contiguous copies.
+
+        dccrn_args = {k: v for k, v in config.items() if k in _DCCRN_KEYS}
+        self.model = DCCRN(**dccrn_args)
+
+        lookahead = int(config.get('lookahead', 0))
+
+        if lookahead < 0:
+            raise ValueError('lookahead must be non-negative')
+        if lookahead > 0:
+            self.model.enhance = DelayedLSTM(self.model.enhance, delay=lookahead)
+
+        if config.get('bidirectional', False):
+            if lookahead > 0:
+                raise ValueError('bidirectional LSTM cannot be used with lookahead')
+            units = self.model.rnn_units
+            feat = self.model.tranform.out_features
+            self.model.enhance = nn.LSTM(feat, units, num_layers=2, bidirectional=True)
+            self.model.tranform = nn.Linear(units * 2, feat)
+            
         for module in self.model.modules():
             for name, buf in module._buffers.items():
                 if buf is not None:
                     module._buffers[name] = buf.contiguous()
         # Saved in the checkpoint so enhance() can detect a CONFIG mismatch.
         self.register_buffer('config_check', self._config_vector())
+        self._register_load_state_dict_pre_hook(self._upgrade_old_checkpoint)
 
     def _config_vector(self):
         c = self.config
         return torch.tensor([_MODE_CODE[c.get('masking_mode', 'E')],
-                             float(c.get('use_clstm', False)), float(c.get('use_cbn', False))])
+                         float(c.get('use_clstm', False)),
+                         float(c.get('use_cbn', False)),
+                         float(c.get('lookahead', 0)),            # NEW
+                         float(c.get('bidirectional', False))])   # NEW (used later for the BLSTM)
+
+    @staticmethod
+    def _upgrade_old_checkpoint(state_dict, prefix, *args):
+        """Old checkpoints have a 3-number label. They were all trained with
+        lookahead 0 and no BLSTM, so add two zeros to make it 5 numbers."""
+        key = prefix + 'config_check'
+        if key in state_dict and state_dict[key].numel() == 3:
+            state_dict[key] = torch.cat([state_dict[key], state_dict[key].new_zeros(2)])
 
     def forward(self, wave):
         """[B, T] with T a multiple of the hop -> (spec, wave), as in DCCRN."""
@@ -864,13 +916,14 @@ class CourseEnhancer(nn.Module):
         if sample_rate != SAMPLE_RATE or waveform.ndim != 2 or waveform.shape[0] != 1:
             raise ValueError('expected one [1,T] waveform at 16 kHz')
         expected = self._config_vector().to(self.config_check)
-        if not torch.equal(self.config_check, expected):
+        if self.config_check.shape != expected.shape or not torch.equal(self.config_check, expected):
             raise ValueError('checkpoint was trained with a different CONFIG '
                              f'(checkpoint {self.config_check.tolist()}, code {expected.tolist()})')
         length = waveform.shape[-1]
         # The STFT/iSTFT return exactly T samples when T is a multiple of the hop.
         _, out_wav = self.model(pad_to_hop(waveform, self.model.win_inc))
         return out_wav[..., :length]
+
 
 
 def build_enhancer(sample_rate):

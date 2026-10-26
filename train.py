@@ -155,6 +155,9 @@ def main() -> None:
     ap.add_argument("--masking-mode", default="E", choices=["E", "C", "R"])
     ap.add_argument("--clstm", action="store_true")
     ap.add_argument("--use-cbn", action="store_true")
+    ap.add_argument("--lookahead", type=int, default=0, help="lookahead frames for the DelayedLSTM")
+    ap.add_argument("--bidirectional", action="store_true", help="use a BLSTM instead of the DelayedLSTM (cannot be combined with --lookahead)")
+    ap.add_argument("--rnn-units", type=int, default=142, help="number of units in the BLSTM (ignored if --bidirectional is not set)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 
