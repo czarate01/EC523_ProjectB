@@ -820,9 +820,8 @@ CONFIG = dict(
     masking_mode='E',      # 'E', 'C', or 'R' (paper Eqs. 7-9)
     use_clstm=False,       # True: DCCRN-CL (use kernel_num [32, 64, 128, 256, 256, 256])
     use_cbn=False,         # True: complex batch norm (repository default is False)
-    lookahead = 0,             # 0: causal (paper default), 1: non-causal (repository default is 1)
-    bidirectional = False,    # True: bidirectional LSTM (paper default), False: unidirectional (repository default is True)
-
+    lookahead=0,           # extra future frames for the LSTM (6.25 ms each); 0 = original DCCRN
+    bidirectional=False,   # True = bidirectional LSTM (our full-context run; use rnn_units=142)
 )
 _MODE_CODE = {'E': 0.0, 'C': 1.0, 'R': 2.0}
 
@@ -882,6 +881,10 @@ class CourseEnhancer(nn.Module):
             feat = self.model.tranform.out_features
             self.model.enhance = nn.LSTM(feat, units, num_layers=2, bidirectional=True)
             self.model.tranform = nn.Linear(units * 2, feat)
+
+
+        # The original STFT kernels are transposed numpy arrays (non-contiguous);
+        # safetensors refuses to save those, so store contiguous copies.
             
         for module in self.model.modules():
             for name, buf in module._buffers.items():

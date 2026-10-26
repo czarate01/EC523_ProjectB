@@ -33,7 +33,7 @@ def first_changed_frame(model, hop=100):
     with torch.no_grad():
         y0 = model(x)[1]
         y1 = model(x2)[1]
-    changed = (y0 - y1).abs() > 1e-6
+    changed = (y0 - y1).abs() > 0
     first_sample = changed.nonzero()[0, -1].item()
     return first_sample // hop
 

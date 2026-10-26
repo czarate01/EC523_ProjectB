@@ -102,7 +102,10 @@ def seed_everything(seed: int) -> None:
 
 def model_config(args) -> dict:
     cfg = dict(CONFIG)
-    cfg.update(masking_mode=args.masking_mode, use_clstm=args.clstm, use_cbn=args.use_cbn)
+    cfg.update(masking_mode=args.masking_mode, use_clstm=args.clstm, use_cbn=args.use_cbn,
+               lookahead=args.lookahead, bidirectional=args.bidirectional)
+    if args.bidirectional:          # BLSTM: 142 units per direction matches the baseline's size
+        cfg["rnn_units"] = args.rnn_units
     if args.clstm:  # paper DCCRN-CL channel plan (as in the repository's __main__)
         cfg["kernel_num"] = [32, 64, 128, 256, 256, 256]
     cfg["kernel_num"] = list(cfg["kernel_num"])
