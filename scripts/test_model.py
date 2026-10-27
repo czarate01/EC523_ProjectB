@@ -46,3 +46,8 @@ print("difference (want 8):", f0 - f8)
 mb = CourseEnhancer(**{**CONFIG, "bidirectional": True, "rnn_units": 142}).eval()
 print('params, BLSTM-142',sum(p.numel() for p in mb.parameters()))  # want 3981581
 print('first changed output frame, BLSTM-142', first_changed_frame(mb))  # want 0
+
+for la in (0, 8, -1):
+    mc = CourseEnhancer(**{**CONFIG, "conformer": True, "lookahead": la}).eval()
+    print(f"conformer lookahead {la}: params {sum(p.numel() for p in mc.parameters())}, "
+          f"first changed frame {first_changed_frame(mc)}")

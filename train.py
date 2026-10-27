@@ -163,6 +163,8 @@ def main() -> None:
     ap.add_argument("--rnn-units", type=int, default=142, help="number of units in the BLSTM (ignored if --bidirectional is not set)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--warmup-steps", type=int, default=0, help="linearly raise the learning rate from 0 over this many steps (0 = off)")
+    ap.add_argument("--conformer", action="store_true",
+                    help="Conformer instead of the LSTM; use --lookahead -1 for the whole utterance")
     args = ap.parse_args()
 
     seed_everything(args.seed)

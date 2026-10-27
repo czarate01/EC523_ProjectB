@@ -822,6 +822,7 @@ CONFIG = dict(
     use_cbn=False,         # True: complex batch norm (repository default is False)
     lookahead=0,           # extra future frames for the LSTM (6.25 ms each); 0 = original DCCRN
     bidirectional=False,   # True = bidirectional LSTM (our full-context run; use rnn_units=142)
+    conformer=False,          # True = use a Conformer instead of an LSTM (our full-context run; use rnn_units=142)
 )
 _MODE_CODE = {'E': 0.0, 'C': 1.0, 'R': 2.0}
 
@@ -849,6 +850,97 @@ class DelayedLSTM(nn.Module):
         filtered_out = out[mask]
         return filtered_out, state
 
+class _FeedForward(nn.Module):
+    """Processes each frame on its own (no mixing across time)."""
+    def __init__(self, d, dropout):
+        super().__init__()
+        self.net = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, 4 * d), nn.SiLU(),
+                                 nn.Dropout(dropout), nn.Linear(4 * d, d), nn.Dropout(dropout))
+
+    def forward(self, x):                      # x: [B, T, d]
+        return self.net(x)
+
+
+class _ConvModule(nn.Module):
+    """Local context: a sliding window of `kernel` frames along time."""
+    def __init__(self, d, kernel, dropout, causal):
+        super().__init__()
+        self.norm = nn.LayerNorm(d)
+        self.pw1 = nn.Conv1d(d, 2 * d, 1)       # 1x1 conv: mix channels, double them for the GLU
+        self.glu = nn.GLU(dim=1)                # gate: keeps half the channels, scaled by the other half
+        self.dw = nn.Conv1d(d, d, kernel, groups=d)   # depthwise: each channel slides its own window
+        self.bn = nn.BatchNorm1d(d)
+        self.act = nn.SiLU()
+        self.pw2 = nn.Conv1d(d, d, 1)
+        self.drop = nn.Dropout(dropout)
+        # causal: pad only the past, so no future frame is used; otherwise centre the window
+        self.pad = (kernel - 1, 0) if causal else ((kernel - 1) // 2, kernel - 1 - (kernel - 1) // 2)
+
+    def forward(self, x):                      # x: [B, T, d]
+        h = self.norm(x).transpose(1, 2)        # Conv1d wants [B, d, T]
+        h = self.glu(self.pw1(h))
+        h = self.dw(F.pad(h, self.pad))
+        h = self.pw2(self.act(self.bn(h)))
+        return self.drop(h).transpose(1, 2)    # back to [B, T, d]
+
+
+class ConformerBlock(nn.Module):
+    """half feed-forward -> self-attention -> convolution -> half feed-forward.
+
+    future = None: attend to the whole utterance; future = k: at most k frames ahead.
+    """
+    def __init__(self, d, heads, kernel, dropout, future):
+        super().__init__()
+        self.ff1 = _FeedForward(d, dropout)
+        self.attn_norm = nn.LayerNorm(d)
+        self.attn = nn.MultiheadAttention(d, heads, dropout=dropout, batch_first=True)
+        self.attn_drop = nn.Dropout(dropout)
+        self.conv = _ConvModule(d, kernel, dropout, causal=future is not None)
+        self.ff2 = _FeedForward(d, dropout)
+        self.out_norm = nn.LayerNorm(d)
+        self.future, self.heads = future, heads
+
+    def _attn_mask(self, T, B, device, dtype):
+        i = torch.arange(T, device=device)
+        dist = i[None, :] - i[:, None]                       # dist[q, k] = k - q; > 0: key is in the future
+        slopes = 2.0 ** -(4.0 + 2.0 * torch.arange(self.heads, device=device, dtype=dtype))
+        bias = -slopes.view(-1, 1, 1) * dist.abs().to(dtype)[None]   # each head prefers nearby frames
+        if self.future is not None:
+            bias = bias.masked_fill((dist > self.future)[None], float('-inf'))  # block frames too far ahead
+        return bias.repeat(B, 1, 1)                          # [B*heads, T, T]
+
+    def forward(self, x):                      # x: [B, T, d]
+        B, T, _ = x.shape
+        x = x + 0.5 * self.ff1(x)
+        h = self.attn_norm(x)
+        h, _ = self.attn(h, h, h, attn_mask=self._attn_mask(T, B, x.device, x.dtype), need_weights=False)
+        x = x + self.attn_drop(h)
+        x = x + self.conv(x)
+        x = x + 0.5 * self.ff2(x)
+        return self.out_norm(x)
+
+
+class ConformerBottleneck(nn.Module):
+    """Replaces DCCRN's LSTM + Linear: [T, B, 1024] -> ([T, B, 1024], None).
+
+    lookahead -1: whole utterance. lookahead D >= 0: only the first block may look
+    D frames ahead; everything after it is causal, so the total look-ahead is exactly D.
+    """
+    def __init__(self, in_dim, d_model=192, blocks=2, heads=4, kernel=15, dropout=0.1, lookahead=-1):
+        super().__init__()
+        self.proj_in = nn.Linear(in_dim, d_model)
+        self.blocks = nn.ModuleList(
+            ConformerBlock(d_model, heads, kernel, dropout,
+                           future=None if lookahead < 0 else (lookahead if i == 0 else 0))
+            for i in range(blocks))
+        self.proj_out = nn.Linear(d_model, in_dim)
+
+    def forward(self, x):                      # x: [T, B, F]
+        h = self.proj_in(x).transpose(0, 1)     # [B, T, d]
+        for block in self.blocks:
+            h = block(h)
+        return self.proj_out(h).transpose(0, 1), None   # (output, state) like nn.LSTM
+
 class CourseEnhancer(nn.Module):
     """Wraps the unmodified DCCRN class in the course interface.
 
@@ -868,20 +960,26 @@ class CourseEnhancer(nn.Module):
         self.model = DCCRN(**dccrn_args)
 
         lookahead = int(config.get('lookahead', 0))
+        conformer = config.get('conformer', False)
+        bidirectional = config.get('bidirectional', False)
 
-        if lookahead < 0:
-            raise ValueError('lookahead must be non-negative')
-        if lookahead > 0:
+        if lookahead < 0 and not conformer:
+            raise ValueError('lookahead -1 (whole utterance) is only for the conformer; '
+                             'for the LSTM use bidirectional=True')
+        if bidirectional and (lookahead != 0 or conformer):
+            raise ValueError('bidirectional LSTM cannot be combined with lookahead or conformer')
+
+        if conformer:
+            feat = self.model.tranform.out_features          # 1024
+            self.model.enhance = ConformerBottleneck(feat, lookahead=lookahead)
+            self.model.tranform = nn.Identity()              # proj_out already maps back to 1024
+        elif lookahead > 0:
             self.model.enhance = DelayedLSTM(self.model.enhance, delay=lookahead)
-
-        if config.get('bidirectional', False):
-            if lookahead > 0:
-                raise ValueError('bidirectional LSTM cannot be used with lookahead')
+        elif bidirectional:
             units = self.model.rnn_units
             feat = self.model.tranform.out_features
             self.model.enhance = nn.LSTM(feat, units, num_layers=2, bidirectional=True)
             self.model.tranform = nn.Linear(units * 2, feat)
-
 
         # The original STFT kernels are transposed numpy arrays (non-contiguous);
         # safetensors refuses to save those, so store contiguous copies.
@@ -900,16 +998,18 @@ class CourseEnhancer(nn.Module):
                          float(c.get('use_clstm', False)),
                          float(c.get('use_cbn', False)),
                          float(c.get('lookahead', 0)),            # NEW
-                         float(c.get('bidirectional', False))])   # NEW (used later for the BLSTM)
-
+                         float(c.get('bidirectional', False)),   # NEW (used later for the BLSTM)
+                         float(c.get('conformer', False))])
+    
+    
     @staticmethod
     def _upgrade_old_checkpoint(state_dict, prefix, *args):
-        """Old checkpoints have a 3-number label. They were all trained with
-        lookahead 0 and no BLSTM, so add two zeros to make it 5 numbers."""
+        """Older checkpoints have shorter labels (3 or 5 numbers). The settings they
+        lack were all off (0), so pad with zeros up to the current 6."""
         key = prefix + 'config_check'
-        if key in state_dict and state_dict[key].numel() == 3:
-            state_dict[key] = torch.cat([state_dict[key], state_dict[key].new_zeros(2)])
-
+        if key in state_dict and state_dict[key].numel() < 6:
+            old = state_dict[key]
+            state_dict[key] = torch.cat([old, old.new_zeros(6 - old.numel())])
     def forward(self, wave):
         """[B, T] with T a multiple of the hop -> (spec, wave), as in DCCRN."""
         return self.model(wave)
