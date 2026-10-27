@@ -822,7 +822,7 @@ CONFIG = dict(
     use_cbn=False,         # True: complex batch norm (repository default is False)
     lookahead=0,           # extra future frames for the LSTM (6.25 ms each); 0 = original DCCRN
     bidirectional=False,   # True = bidirectional LSTM (our full-context run; use rnn_units=142)
-    conformer=False,          # True = use a Conformer instead of an LSTM (our full-context run; use rnn_units=142)
+    conformer=False,       # True = Conformer instead of the LSTM; lookahead -1 = whole utterance
 )
 _MODE_CODE = {'E': 0.0, 'C': 1.0, 'R': 2.0}
 

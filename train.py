@@ -103,7 +103,7 @@ def seed_everything(seed: int) -> None:
 def model_config(args) -> dict:
     cfg = dict(CONFIG)
     cfg.update(masking_mode=args.masking_mode, use_clstm=args.clstm, use_cbn=args.use_cbn,
-               lookahead=args.lookahead, bidirectional=args.bidirectional)
+               lookahead=args.lookahead, bidirectional=args.bidirectional, conformer=args.conformer)
     if args.bidirectional:          # BLSTM: 142 units per direction matches the baseline's size
         cfg["rnn_units"] = args.rnn_units
     if args.clstm:  # paper DCCRN-CL channel plan (as in the repository's __main__)
@@ -222,7 +222,7 @@ def main() -> None:
     objective = Objective(args.stft_weight, args.pesq_weight, args.pesq_floor, device)
 
 
-    step = 0
+    step = 0 if start_epoch == 0 else args.warmup_steps   # no warm-up again after a resume
     for epoch in range(start_epoch, args.epochs):
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
