@@ -162,6 +162,7 @@ def main() -> None:
     ap.add_argument("--bidirectional", action="store_true", help="use a BLSTM instead of the DelayedLSTM (cannot be combined with --lookahead)")
     ap.add_argument("--rnn-units", type=int, default=142, help="number of units in the BLSTM (ignored if --bidirectional is not set)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--warmup-steps", type=int, default=0, help="linearly raise the learning rate from 0 over this many steps (0 = off)")
     args = ap.parse_args()
 
     seed_everything(args.seed)
@@ -218,6 +219,8 @@ def main() -> None:
                          "dev_loss", "dev_si_snr", "lr", "epoch_seconds", "peak_mem_gib"])
     objective = Objective(args.stft_weight, args.pesq_weight, args.pesq_floor, device)
 
+
+    step = 0
     for epoch in range(start_epoch, args.epochs):
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
@@ -233,7 +236,11 @@ def main() -> None:
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            if step < args.warmup_steps:          # warm-up: lr goes 0 -> args.lr over the first steps
+                for g in opt.param_groups:
+                    g["lr"] = args.lr * (step + 1) / args.warmup_steps
             opt.step()
+            step += 1
             tl.append(loss.item()); ts.append(snr.item()); tp.append(spec.item()); tq.append(pq.item())
 
         dev_loss, dev_snr = evaluate(model, dev_loader, device, objective)
