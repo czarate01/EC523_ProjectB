@@ -216,6 +216,8 @@ def main() -> None:
             # (e.g. Conformer weights loaded into an LSTM model, or a different look-ahead).
             expected = model._config_vector().to(device)
             saved = weights["config_check"]
+            if saved.numel() < expected.numel():  # older checkpoints stored fewer settings; the missing ones were off (0)
+                saved = torch.cat([saved, saved.new_zeros(expected.numel() - saved.numel())])
             if saved.shape != expected.shape or not torch.equal(saved, expected):
                 raise ValueError(f"--init-from was trained with different settings "
                                  f"({saved.tolist()} vs {expected.tolist()}); match the flags")
