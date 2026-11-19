@@ -23,7 +23,7 @@ cp cli/submission/model.py "$SRC"
 for kv in "$@"; do
     key=${kv%%=*}; value=${kv#*=}
     grep -q -E "^    $key=" "$SRC" || { echo "CONFIG has no setting '$key'"; exit 1; }
-    sed -i -E "s/^    $key=[^,]*,/    $key=$value,/" "$SRC"
+    sed -i -E "s/^    $key=(\[[^]]*\]|[^,]*),/    $key=$value,/" "$SRC"
 done
 echo "CONFIG used for $RUN:"
 sed -n '/^CONFIG = dict(/,/^)/p' "$SRC"
